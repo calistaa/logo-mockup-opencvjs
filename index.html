@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Logo → Mockup Composer (OpenCV.js)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --pad: 14px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: var(--pad); }
+    h1 { font-size: 1.35rem; margin: 0 0 12px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    fieldset { border: 1px solid #ddd; border-radius: 10px; padding: 10px; }
+    legend { color: #555; padding: 0 6px; }
+    label { display: inline-flex; align-items: center; gap: 8px; }
+    input[type="number"] { width: 110px; }
+    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #status { color: #666; font-size: 0.9rem; }
+    #canvas { max-width: min(100%, 1100px); width: 100%; height: auto; border: 1px dashed #ddd; border-radius: 10px; }
+  </style>
+  <!-- Tip: for Pages, you can also commit opencv.js locally and reference it relatively. -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+</head>
+<body>
+  <h1>Logo → Mockup Composer (OpenCV.js, runs fully in your browser)</h1>
+
+  <div class="grid">
+    <fieldset>
+      <legend>Images</legend>
+      <div class="row">
+        <label>Mockup <input id="mockup" type="file" accept="image/*" /></label>
+        <label>Logo <input id="logo" type="file" accept="image/*" /></label>
+        <label><input id="whiten" type="checkbox" checked /> Make white transparent</label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Logo Transform</legend>
+      <div class="row">
+        <label>Width <input id="w" type="number" value="250" min="1" /></label>
+        <label>Height <input id="h" type="number" value="250" min="1" /></label>
+      </div>
+      <div class="row">
+        <label>X <input id="x" type="number" value="387" /></label>
+        <label>Y <input id="y" type="number" value="565" /></label>
+      </div>
+      <div class="row">
+        <label>Rotation (°) <input id="rot" type="number" value="0" step="0.1" /></label>
+        <label>Curvature (−0.45…0.45) <input id="curv" type="number" value="-0.12" step="0.01" min="-0.45" max="0.45" /></label>
+      </div>
+    </fieldset>
+
+    <div class="row">
+      <button id="render" disabled>Render</button>
+      <button id="download" disabled>Download PNG</button>
+      <span id="status">Loading OpenCV…</span>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <!-- Hidden <img> elements for decoding with cv.imread -->
+    <img id="imgMockup" style="display:none" />
+    <img id="imgLogo" style="display:none" />
+  </div>
+
+<script>
+(function(){
+  const $ = (id)=>document.getElementById(id);
+  const state = { cvReady: false };
+
+  // Wait for OpenCV.js
+  function onCVReady(){
+    state.cvReady = true;
+    $("status").textContent = "OpenCV ready.";
+    $("render").disabled = false;
+  }
+  // opencv.js sets cv.onRuntimeInitialized
+  window.Module = window.Module || {};
+  window.cv = window.cv || {};
+  let cvInitTimer = setInterval(()=>{
+    if (window.cv && cv.Mat) {
+      if (cv['onRuntimeInitialized']) {
+        // If provided by the build, hook it
+        const prev = cv['onRuntimeInitialized'];
+        cv['onRuntimeInitialized'] = ()=>{ prev(); onCVReady(); };
+      } else {
+        onCVReady();
+      }
+      clearInterval(cvInitTimer);
+    }
+  }, 50);
+
+  async function readImageFileToElement(file, imgEl){
+    return new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        imgEl.onload = ()=> resolve();
+        imgEl.onerror = (e)=> reject(e);
+        imgEl.src = reader.result;
+      };
+      reader.onerror = (e)=> reject(e);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function ensureRGBA(src){
+    // cv.imread usually returns RGBA already, but be defensive
+    if (src.type() === cv.CV_8UC4) return src;
+    const out = new cv.Mat();
+    if (src.type() === cv.CV_8UC3) cv.cvtColor(src, out, cv.COLOR_RGB2RGBA);
+    else if (src.type() === cv.CV_8UC1) cv.cvtColor(src, out, cv.COLOR_GRAY2RGBA);
+    else cv.cvtColor(src, out, cv.COLOR_RGBA2RGBA);
+    src.delete();
+    return out;
+  }
+
+  function alphaFromWhite(rgba, thresh=240){
+    const gray = new cv.Mat();
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    const alpha = new cv.Mat();
+    cv.threshold(gray, alpha, thresh, 255, cv.THRESH_BINARY_INV);
+    const ch = new cv.MatVector();
+    cv.split(rgba, ch);
+    ch.set(3, alpha);
+    const out = new cv.Mat();
+    cv.merge(ch, out);
+    gray.delete(); alpha.delete(); ch.delete(); rgba.delete();
+    return out;
+  }
+
+  function resizeTo(mat, w, h){
+    const dst = new cv.Mat();
+    cv.resize(mat, dst, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
+    mat.delete();
+    return dst;
+  }
+
+  function rotateWithBounds(src, angleDeg){
+    const center = new cv.Point(src.cols/2, src.rows/2);
+    const M = cv.getRotationMatrix2D(center, angleDeg, 1.0);
+    const m = M.data64F; // [a,b,tx, c,d,ty]
+    const cos = Math.abs(m[0]);
+    const sin = Math.abs(m[1]);
+    const nW = Math.round(src.rows * sin + src.cols * cos);
+    const nH = Math.round(src.rows * cos + src.cols * sin);
+    // shift
+    m[2] += nW/2 - center.x;
+    m[5] += nH/2 - center.y;
+    const dst = new cv.Mat();
+    cv.warpAffine(src, dst, M, new cv.Size(nW, nH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0,0,0,0));
+    src.delete(); M.delete();
+    return dst;
+  }
+
+  function cylindricalWarp(src, curveStrength){
+    const k = Math.max(-0.45, Math.min(0.45, parseFloat(curveStrength)));
+    if (Math.abs(k) < 1e-6) return src; // passthrough
+    const h = src.rows, w = src.cols;
+    const cx = w/2, cy = h/2;
+    const f = w / (2.0 * Math.tan(Math.max(1e-6, Math.abs(k)) * Math.PI / 4.0));
+
+    const mapX = new cv.Mat(h, w, cv.CV_32FC1);
+    const mapY = new cv.Mat(h, w, cv.CV_32FC1);
+
+    for (let y=0; y<h; y++){
+      const mapXrow = mapX.floatPtr(y);
+      const mapYrow = mapY.floatPtr(y);
+      for (let x=0; x<w; x++){
+        const xprime = x - cx;
+        const yprime = y - cy;
+        let xsrc = Math.tan(xprime / f) * f;
+        let ysrc = yprime * Math.sqrt(xsrc*xsrc + f*f) / f;
+        xsrc *= Math.sign(k);
+        mapXrow[x] = xsrc + cx;
+        mapYrow[x] = ysrc + cy;
+      }
+    }
+    const dst = new cv.Mat();
+    cv.remap(src, dst, mapX, mapY, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0,0,0,0));
+    src.delete(); mapX.delete(); mapY.delete();
+    return dst;
+  }
+
+  function clampROI(x, y, w, h, maxW, maxH){
+    const wClip = Math.min(w, Math.max(0, maxW - x));
+    const hClip = Math.min(h, Math.max(0, maxH - y));
+    return { w: wClip, h: hClip };
+  }
+
+  async function render(){
+    if (!state.cvReady) return;
+    const mockFile = $("mockup").files[0];
+    const logoFile  = $("logo").files[0];
+    if (!mockFile || !logoFile) { alert("Pick a mockup and a logo first."); return; }
+
+    $("render").disabled = true; $("download").disabled = true; $("status").textContent = "Rendering…";
+
+    const imgMock = $("imgMockup");
+    const imgLogo = $("imgLogo");
+    try {
+      await readImageFileToElement(mockFile, imgMock);
+      await readImageFileToElement(logoFile, imgLogo);
+
+      // Read into Mats
+      let mockup = cv.imread(imgMock); // RGBA
+      let logo   = cv.imread(imgLogo); // RGBA
+      mockup = ensureRGBA(mockup);
+      logo   = ensureRGBA(logo);
+
+      if ($("whiten").checked) {
+        logo = alphaFromWhite(logo, 240);
+      }
+
+      // Resize
+      const W = parseInt($("w").value, 10);
+      const H = parseInt($("h").value, 10);
+      logo = resizeTo(logo, W, H);
+
+      // Cylindrical warp + rotate
+      const curv = parseFloat($("curv").value || 0);
+      logo = cylindricalWarp(logo, curv);
+      const rot = parseFloat($("rot").value || 0);
+      logo = rotateWithBounds(logo, rot);
+
+      // Place (crop if spilling)
+      const x = parseInt($("x").value, 10) || 0;
+      const y = parseInt($("y").value, 10) || 0;
+      const Hm = mockup.rows, Wm = mockup.cols;
+      const { w: wClip, h: hClip } = clampROI(x, y, logo.cols, logo.rows, Wm, Hm);
+      if (wClip <= 0 || hClip <= 0){
+        mockup.delete(); logo.delete();
+        throw new Error("ROI is outside the mockup bounds.");
+      }
+
+      // Crop logo and ROI
+      const logoRect = new cv.Rect(0, 0, wClip, hClip);
+      const logoCrop = logo.roi(logoRect);
+      const roiRect = new cv.Rect(x, y, wClip, hClip);
+      const mockROI = mockup.roi(roiRect); // RGBA
+
+      // Split logo alpha and RGB
+      const mvLogo = new cv.MatVector();
+      cv.split(logoCrop, mvLogo);
+      const logoRGB = new cv.Mat();
+      cv.merge(new cv.MatVector([mvLogo.get(0), mvLogo.get(1), mvLogo.get(2)]), logoRGB); // 3-ch
+      const logoA = mvLogo.get(3);
+      mvLogo.delete();
+
+      // Blur alpha
+      const aBlur = new cv.Mat();
+      cv.GaussianBlur(logoA, aBlur, new cv.Size(5,5), 0, 0, cv.BORDER_DEFAULT);
+
+      // ROI RGB + luminance (for shading multiply)
+      const roiRGB = new cv.Mat();
+      cv.cvtColor(mockROI, roiRGB, cv.COLOR_RGBA2RGB);
+      const roiGray = new cv.Mat();
+      cv.cvtColor(roiRGB, roiGray, cv.COLOR_RGB2GRAY);
+
+      // Convert everything to float
+      const logoRGB32 = new cv.Mat(); logoRGB.convertTo(logoRGB32, cv.CV_32F);
+      const roiRGB32  = new cv.Mat(); roiRGB.convertTo(roiRGB32,  cv.CV_32F);
+
+      const light32_1 = new cv.Mat(); roiGray.convertTo(light32_1, cv.CV_32F, 1/255.0);
+      const light32_3 = new cv.Mat();
+      cv.merge(new cv.MatVector([light32_1, light32_1, light32_1]), light32_3);
+
+      const fgShaded32 = new cv.Mat();
+      cv.multiply(logoRGB32, light32_3, fgShaded32); // logo * light
+
+      const alpha32_1 = new cv.Mat(); aBlur.convertTo(alpha32_1, cv.CV_32F, 1/255.0);
+      const alpha32_3 = new cv.Mat();
+      cv.merge(new cv.MatVector([alpha32_1, alpha32_1, alpha32_1]), alpha32_3);
+
+      const ones = new cv.Mat(alpha32_3.rows, alpha32_3.cols, cv.CV_32FC3, new cv.Scalar(1,1,1));
+      const invAlpha32_3 = new cv.Mat();
+      cv.subtract(ones, alpha32_3, invAlpha32_3);
+
+      const part1 = new cv.Mat(); // fg * a
+      cv.multiply(fgShaded32, alpha32_3, part1);
+      const part2 = new cv.Mat(); // roi * (1-a)
+      cv.multiply(roiRGB32, invAlpha32_3, part2);
+      const blended32 = new cv.Mat();
+      cv.add(part1, part2, blended32);
+
+      const blended8 = new cv.Mat(); blended32.convertTo(blended8, cv.CV_8U);
+
+      // Convert blended back to RGBA & write into ROI
+      const blendedRGBA = new cv.Mat();
+      cv.cvtColor(blended8, blendedRGBA, cv.COLOR_RGB2RGBA);
+      // Set alpha to fully opaque in the ROI region
+      const chBlend = new cv.MatVector();
+      cv.split(blendedRGBA, chBlend);
+      chBlend.set(3, new cv.Mat(blendedRGBA.rows, blendedRGBA.cols, cv.CV_8UC1, new cv.Scalar(255)));
+      const blendedRGBA2 = new cv.Mat();
+      cv.merge(chBlend, blendedRGBA2);
+      blendedRGBA.delete(); chBlend.delete();
+
+      blendedRGBA2.copyTo(mockROI);
+
+      // Show result
+      const canvas = $("canvas");
+      canvas.width = mockup.cols; canvas.height = mockup.rows;
+      cv.imshow(canvas, mockup);
+
+      // Cleanup
+      logo.delete();
+      logoCrop.delete();
+      logoRGB.delete();
+      logoA.delete();
+      aBlur.delete();
+      roiRGB.delete();
+      roiGray.delete();
+      logoRGB32.delete();
+      roiRGB32.delete();
+      light32_1.delete();
+      light32_3.delete();
+      fgShaded32.delete();
+      alpha32_1.delete();
+      alpha32_3.delete();
+      ones.delete();
+      invAlpha32_3.delete();
+      part1.delete();
+      part2.delete();
+      blended32.delete();
+      blended8.delete();
+      blendedRGBA2.delete();
+      mockROI.delete();
+      mockup.delete();
+
+      $("status").textContent = "Done.";
+      $("download").disabled = false;
+    } catch (err){
+      console.error(err);
+      $("status").textContent = `Error: ${err.message || err}`;
+    } finally {
+      $("render").disabled = false;
+    }
+  }
+
+  function downloadPNG(){
+    const canvas = $("canvas");
+    if (!canvas.width || !canvas.height) return;
+    canvas.toBlob((blob)=>{
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'mockup.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=> URL.revokeObjectURL(url), 2500);
+    }, 'image/png');
+  }
+
+  $("render").addEventListener('click', render);
+  $("download").addEventListener('click', downloadPNG);
+})();
+</script>
+</body>
+</html>
