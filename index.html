@@ -181,13 +181,9 @@
     src.delete(); mapX.delete(); mapY.delete();
     return dst;
   }
-    const dst = new cv.Mat();
-    cv.remap(src, dst, mapX, mapY, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0,0,0,0));
-    src.delete(); mapX.delete(); mapY.delete();
-    return dst;
-  }
+   
 
-  async function clampROI(x, y, w, h, maxW, maxH){
+  function clampROI(x, y, w, h, maxW, maxH){
     const wClip = Math.min(w, Math.max(0, maxW - x));
     const hClip = Math.min(h, Math.max(0, maxH - y));
     return { w: wClip, h: hClip };
