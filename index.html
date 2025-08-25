@@ -47,8 +47,9 @@
       </div>
       <div class="row">
         <label>Rotation (°) <input id="rot" type="number" value="0" step="0.1" /></label>
-        <label>Curvature (−0.45…0.45) <input id="curv" type="number" value="-0.12" step="0.01" min="-0.45" max="0.45" /></label>
+        <label>Curvature (0…0.45) <input id="curv" type="number" value="0.12" step="0.01" min="0" max="0.45" /></label>
       </div>
+      <div class="row"><label><input id="flipX" type="checkbox" /> Flip horizontally</label></div>
     </fieldset>
 
     <div class="row">
@@ -154,11 +155,11 @@
   }
 
   function cylindricalWarp(src, curveStrength){
-    const k = Math.max(-0.45, Math.min(0.45, parseFloat(curveStrength)));
-    if (Math.abs(k) < 1e-6) return src; // passthrough
+    const k = Math.min(0.45, Math.max(0, Math.abs(parseFloat(curveStrength) || 0)));
+    if (k < 1e-6) return src; // passthrough
     const h = src.rows, w = src.cols;
     const cx = w/2, cy = h/2;
-    const f = w / (2.0 * Math.tan(Math.max(1e-6, Math.abs(k)) * Math.PI / 4.0));
+    const f = w / (2.0 * Math.tan(k * Math.PI / 4.0));
 
     const mapX = new cv.Mat(h, w, cv.CV_32FC1);
     const mapY = new cv.Mat(h, w, cv.CV_32FC1);
@@ -169,13 +170,17 @@
       for (let x=0; x<w; x++){
         const xprime = x - cx;
         const yprime = y - cy;
-        let xsrc = Math.tan(xprime / f) * f;
-        let ysrc = yprime * Math.sqrt(xsrc*xsrc + f*f) / f;
-        xsrc *= Math.sign(k);
+        const xsrc = Math.tan(xprime / f) * f;
+        const ysrc = yprime * Math.sqrt(xsrc*xsrc + f*f) / f;
         mapXrow[x] = xsrc + cx;
         mapYrow[x] = ysrc + cy;
       }
     }
+    const dst = new cv.Mat();
+    cv.remap(src, dst, mapX, mapY, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0,0,0,0));
+    src.delete(); mapX.delete(); mapY.delete();
+    return dst;
+  }
     const dst = new cv.Mat();
     cv.remap(src, dst, mapX, mapY, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0,0,0,0));
     src.delete(); mapX.delete(); mapY.delete();
@@ -222,6 +227,14 @@
       logo = cylindricalWarp(logo, curv);
       const rot = parseFloat($("rot").value || 0);
       logo = rotateWithBounds(logo, rot);
+
+      // Optional user-controlled flip (no mirroring from curvature)
+      if (document.getElementById("flipX").checked) {
+        const flipped = new cv.Mat();
+        cv.flip(logo, flipped, 1);
+        logo.delete();
+        logo = flipped;
+      }
 
       // Place (crop if spilling)
       const x = parseInt($("x").value, 10) || 0;
