@@ -243,7 +243,12 @@
       const mvLogo = new cv.MatVector();
       cv.split(logoCrop, mvLogo);
       const logoRGB = new cv.Mat();
-      cv.merge(new cv.MatVector([mvLogo.get(0), mvLogo.get(1), mvLogo.get(2)]), logoRGB); // 3-ch
+      const mvRGBVec = new cv.MatVector();
+mvRGBVec.push_back(mvLogo.get(0));
+mvRGBVec.push_back(mvLogo.get(1));
+mvRGBVec.push_back(mvLogo.get(2));
+cv.merge(mvRGBVec, logoRGB); // 3-ch
+mvRGBVec.delete();
       const logoA = mvLogo.get(3);
       mvLogo.delete();
 
@@ -263,14 +268,24 @@
 
       const light32_1 = new cv.Mat(); roiGray.convertTo(light32_1, cv.CV_32F, 1/255.0);
       const light32_3 = new cv.Mat();
-      cv.merge(new cv.MatVector([light32_1, light32_1, light32_1]), light32_3);
+      const lightVec = new cv.MatVector();
+lightVec.push_back(light32_1);
+lightVec.push_back(light32_1);
+lightVec.push_back(light32_1);
+cv.merge(lightVec, light32_3);
+lightVec.delete();
 
       const fgShaded32 = new cv.Mat();
       cv.multiply(logoRGB32, light32_3, fgShaded32); // logo * light
 
       const alpha32_1 = new cv.Mat(); aBlur.convertTo(alpha32_1, cv.CV_32F, 1/255.0);
       const alpha32_3 = new cv.Mat();
-      cv.merge(new cv.MatVector([alpha32_1, alpha32_1, alpha32_1]), alpha32_3);
+      const alphaVec = new cv.MatVector();
+alphaVec.push_back(alpha32_1);
+alphaVec.push_back(alpha32_1);
+alphaVec.push_back(alpha32_1);
+cv.merge(alphaVec, alpha32_3);
+alphaVec.delete();
 
       const ones = new cv.Mat(alpha32_3.rows, alpha32_3.cols, cv.CV_32FC3, new cv.Scalar(1,1,1));
       const invAlpha32_3 = new cv.Mat();
