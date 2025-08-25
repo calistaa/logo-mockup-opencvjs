@@ -187,7 +187,7 @@
     return dst;
   }
 
-  function clampROI(x, y, w, h, maxW, maxH){
+  async function clampROI(x, y, w, h, maxW, maxH){
     const wClip = Math.min(w, Math.max(0, maxW - x));
     const hClip = Math.min(h, Math.max(0, maxH - y));
     return { w: wClip, h: hClip };
